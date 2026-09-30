@@ -178,7 +178,8 @@ async function loadAll(user) {
           {page === 'plans' && <Plans grades={grades} subjects={subjects} reload={reload} setMsg={setMsg} />}
           {page === 'attendance' && <Attendance grades={grades} subjects={subjects} setMsg={setMsg} />}
           {page === 'lab' && <Lab grades={grades} subjects={subjects} setMsg={setMsg} />}
-          {!['home', 'classes', 'students', 'plans', 'attendance', 'lab'].includes(page) && <Placeholder page={page} />}
+          {page === 'files' && <Files grades={grades} subjects={subjects} setMsg={setMsg} />}
+          {!['home', 'classes', 'students', 'plans', 'attendance', 'lab', 'files'].includes(page) && <Placeholder page={page} />}
         </main>
       </div>
     </div>
