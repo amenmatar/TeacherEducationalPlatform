@@ -179,7 +179,8 @@ async function loadAll(user) {
           {page === 'attendance' && <Attendance grades={grades} subjects={subjects} setMsg={setMsg} />}
           {page === 'lab' && <Lab grades={grades} subjects={subjects} setMsg={setMsg} />}
           {page === 'files' && <Files grades={grades} subjects={subjects} setMsg={setMsg} />}
-          {!['home', 'classes', 'students', 'plans', 'attendance', 'lab', 'files'].includes(page) && <Placeholder page={page} />}
+          {page === 'reports' && <Reports grades={grades} subjects={subjects} setMsg={setMsg} />}
+          {!['home', 'classes', 'students', 'plans', 'attendance', 'lab', 'files', 'reports'].includes(page) && <Placeholder page={page} />}
         </main>
       </div>
     </div>
@@ -873,6 +874,209 @@ function Files({ grades, subjects, setMsg }) {
       </tr>)}</tbody></table>
       {!files.length && <div className="empty">المكتبة فارغة حاليًا. ارفع أول ملف.</div>}
     </div>
+  </>;
+}
+
+
+function Reports({ grades, subjects, setMsg }) {
+  const firstOfMonth = () => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10);
+  };
+  const [gradeId, setGradeId] = useState('');
+  const [sectionId, setSectionId] = useState('');
+  const [subjectId, setSubjectId] = useState('');
+  const [from, setFrom] = useState(firstOfMonth());
+  const [to, setTo] = useState(today());
+  const [loading, setLoading] = useState(false);
+  const [report, setReport] = useState(null);
+
+  const sections = grades.find(g => g.id === gradeId)?.sections || [];
+
+  async function loadReport() {
+    setLoading(true);
+    try {
+      const u = (await supabase.auth.getUser()).data.user;
+      if (!u) return;
+
+      let sessionQuery = supabase
+        .from('attendance_sessions')
+        .select('id,section_id,subject_id,attendance_date,lesson_title,sections(name,grades(name)),subjects(name)')
+        .eq('teacher_id', u.id)
+        .gte('attendance_date', from)
+        .lte('attendance_date', to)
+        .order('attendance_date', { ascending: false });
+      if (sectionId) sessionQuery = sessionQuery.eq('section_id', sectionId);
+      if (subjectId) sessionQuery = sessionQuery.eq('subject_id', subjectId);
+
+      const [
+        { data: sessions, error: sessionError },
+        { data: plans, error: planError },
+        { data: labs, error: labError },
+        { data: files, error: fileError }
+      ] = await Promise.all([
+        sessionQuery,
+        supabase.from('lesson_plans')
+          .select('id,grade_id,section_id,subject_id,lesson_date,title,grades(name),sections(name),subjects(name)')
+          .eq('teacher_id', u.id).gte('lesson_date', from).lte('lesson_date', to),
+        supabase.from('lab_activities')
+          .select('id,grade_id,section_id,subject_id,activity_date,title,grades(name),sections(name),subjects(name)')
+          .eq('teacher_id', u.id).gte('activity_date', from).lte('activity_date', to),
+        supabase.from('teacher_files')
+          .select('id,grade_id,section_id,subject_id,created_at,title,category')
+          .eq('teacher_id', u.id).gte('created_at', from + 'T00:00:00').lte('created_at', to + 'T23:59:59')
+      ]);
+      if (sessionError) throw sessionError;
+      if (planError) throw planError;
+      if (labError) throw labError;
+      if (fileError) throw fileError;
+
+      const sessionIds = (sessions || []).map(x => x.id);
+      let records = [];
+      if (sessionIds.length) {
+        const { data, error } = await supabase
+          .from('attendance_records')
+          .select('id,student_id,status,students(full_name,student_number)')
+          .eq('teacher_id', u.id)
+          .in('attendance_session_id', sessionIds);
+        if (error) throw error;
+        records = data || [];
+      }
+
+      let enrollmentQuery = supabase
+        .from('enrollments')
+        .select('student_id,students(full_name,student_number),sections(name,grades(name))')
+        .eq('teacher_id', u.id);
+      if (sectionId) enrollmentQuery = enrollmentQuery.eq('section_id', sectionId);
+      const { data: enrollments, error: enrollmentError } = await enrollmentQuery;
+      if (enrollmentError) throw enrollmentError;
+
+      const counts = { present: 0, absent: 0, late: 0, excused: 0 };
+      const byStudent = new Map();
+      for (const r of records) {
+        if (counts[r.status] !== undefined) counts[r.status]++;
+        const key = r.student_id;
+        const current = byStudent.get(key) || {
+          name: r.students?.full_name || '—',
+          number: r.students?.student_number || '—',
+          total: 0, present: 0, absent: 0, late: 0, excused: 0
+        };
+        current.total++;
+        if (current[r.status] !== undefined) current[r.status]++;
+        byStudent.set(key, current);
+      }
+
+      const students = (enrollments || []).map(x => {
+        const current = byStudent.get(x.student_id) || {
+          name: x.students?.full_name || '—',
+          number: x.students?.student_number || '—',
+          total: 0, present: 0, absent: 0, late: 0, excused: 0
+        };
+        return {
+          ...current,
+          name: x.students?.full_name || current.name,
+          number: x.students?.student_number || current.number,
+          section: x.sections?.name || '—',
+          grade: x.sections?.grades?.name || '—',
+          rate: current.total ? Math.round(((current.present + current.excused) / current.total) * 100) : null
+        };
+      }).sort((a, b) => (b.absent - a.absent) || a.name.localeCompare(b.name, 'ar'));
+
+      const filterRows = rows => (rows || []).filter(x =>
+        (!gradeId || x.grade_id === gradeId) &&
+        (!sectionId || x.section_id === sectionId) &&
+        (!subjectId || x.subject_id === subjectId)
+      );
+
+      setReport({
+        sessions: sessions || [],
+        records,
+        counts,
+        students,
+        plans: filterRows(plans),
+        labs: filterRows(labs),
+        files: filterRows(files),
+        totalStudents: students.length,
+        dateRange: { from, to }
+      });
+    } catch (e) {
+      setMsg('تعذر إنشاء التقرير: ' + e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { loadReport(); }, []);
+
+  function exportStudentsCsv() {
+    if (!report?.students?.length) return setMsg('لا توجد بيانات طلاب لتصديرها.');
+    const rows = [
+      ['الطالب', 'الرقم', 'الصف', 'الشعبة', 'إجمالي السجلات', 'حاضر', 'غائب', 'متأخر', 'معذور', 'نسبة الحضور'],
+      ...report.students.map(x => [x.name, x.number, x.grade, x.section, x.total, x.present, x.absent, x.late, x.excused, x.rate == null ? '—' : x.rate + '%'])
+    ];
+    const csv = '\uFEFF' + rows.map(row => row.map(v => '"' + String(v).replaceAll('"', '""') + '"').join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'تقرير_الطلاب_منصة_المعلم.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return <>
+    <div className="head">
+      <div><h1>التقارير</h1><p>تقارير فعلية من سجلات المنصة، مع تصفية حسب الصف والشعبة والمبحث والفترة.</p></div>
+      <button className="primary" onClick={loadReport} disabled={loading}>{loading ? 'جارٍ بناء التقرير…' : '🔄 تحديث التقرير'}</button>
+    </div>
+
+    <div className="card toolbarCard">
+      <select value={gradeId} onChange={e => { setGradeId(e.target.value); setSectionId(''); }}>
+        <option value="">كل الصفوف</option>{grades.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+      </select>
+      <select value={sectionId} onChange={e => setSectionId(e.target.value)} disabled={!gradeId}>
+        <option value="">كل الشعب</option>{sections.map(s => <option key={s.id} value={s.id}>الشعبة {s.name}</option>)}
+      </select>
+      <select value={subjectId} onChange={e => setSubjectId(e.target.value)}>
+        <option value="">كل المباحث</option>{subjects.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+      <label>من <input type="date" value={from} onChange={e => setFrom(e.target.value)}/></label>
+      <label>إلى <input type="date" value={to} onChange={e => setTo(e.target.value)}/></label>
+      <button className="primary" onClick={loadReport}>تطبيق الفلاتر</button>
+      <button onClick={exportStudentsCsv}>📥 تصدير CSV</button>
+    </div>
+
+    {!report ? <div className="card empty">اضغط «تطبيق الفلاتر» لإنشاء أول تقرير.</div> : <>
+      <div className="stats">
+        <div><small>الطلاب في السياق</small><b>{report.totalStudents}</b></div>
+        <div><small>جلسات الحضور</small><b>{report.sessions.length}</b></div>
+        <div><small>الحاضرون</small><b>{report.counts.present}</b></div>
+        <div><small>الغائبون</small><b>{report.counts.absent}</b></div>
+        <div><small>التحاضير</small><b>{report.plans.length}</b></div>
+        <div><small>الأنشطة المخبرية</small><b>{report.labs.length}</b></div>
+      </div>
+
+      <div className="card table">
+        <div className="row"><div><h2>متابعة الحضور حسب الطالب</h2><small>الفترة: {report.dateRange.from} → {report.dateRange.to}</small></div><button onClick={exportStudentsCsv}>تصدير هذا الجدول</button></div>
+        <table><thead><tr><th>الطالب</th><th>الصف/الشعبة</th><th>السجلات</th><th>حاضر</th><th>غائب</th><th>متأخر</th><th>معذور</th><th>النسبة</th></tr></thead>
+          <tbody>{report.students.map((x, i) => <tr key={x.number + '-' + i}><td>{x.name}</td><td>{x.grade} / {x.section}</td><td>{x.total}</td><td>{x.present}</td><td>{x.absent}</td><td>{x.late}</td><td>{x.excused}</td><td>{x.rate == null ? '—' : x.rate + '%'}</td></tr>)}</tbody>
+        </table>
+        {!report.students.length && <div className="empty">لا توجد تسجيلات أو طلاب ضمن الفلاتر الحالية.</div>}
+      </div>
+
+      <div className="two">
+        <div className="card table"><h2>التحاضير خلال الفترة</h2><table><thead><tr><th>التاريخ</th><th>الصف/الشعبة</th><th>المبحث</th><th>العنوان</th></tr></thead>
+          <tbody>{report.plans.map(x => <tr key={x.id}><td>{x.lesson_date || '—'}</td><td>{x.grades?.name || '—'} / {x.sections?.name || '—'}</td><td>{x.subjects?.name || '—'}</td><td>{x.title}</td></tr>)}</tbody>
+        </table>{!report.plans.length && <div className="empty">لا توجد تحاضير في الفترة.</div>}</div>
+        <div className="card table"><h2>الأنشطة المخبرية</h2><table><thead><tr><th>التاريخ</th><th>النشاط</th><th>السياق</th></tr></thead>
+          <tbody>{report.labs.map(x => <tr key={x.id}><td>{x.activity_date}</td><td>{x.title}</td><td>{x.grades?.name || '—'} / {x.sections?.name || '—'} / {x.subjects?.name || '—'}</td></tr>)}</tbody>
+        </table>{!report.labs.length && <div className="empty">لا توجد أنشطة مخبرية في الفترة.</div>}</div>
+      </div>
+
+      <div className="card table"><h2>الملفات المضافة خلال الفترة</h2><table><thead><tr><th>العنوان</th><th>التصنيف</th><th>تاريخ الإضافة</th></tr></thead>
+        <tbody>{report.files.map(x => <tr key={x.id}><td>{x.title}</td><td>{x.category}</td><td>{new Date(x.created_at).toLocaleDateString('ar-PS')}</td></tr>)}</tbody>
+      </table>{!report.files.length && <div className="empty">لا توجد ملفات مضافة في الفترة.</div>}</div>
+    </>}
   </>;
 }
 
