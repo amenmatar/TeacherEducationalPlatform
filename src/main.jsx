@@ -753,11 +753,131 @@ function Lab({ grades, subjects, setMsg }) {
   </>;
 }
 
+function Files({ grades, subjects, setMsg }) {
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [gradeId, setGradeId] = useState('');
+  const [sectionId, setSectionId] = useState('');
+  const [subjectId, setSubjectId] = useState('');
+  const [category, setCategory] = useState('ورقة عمل');
+  const [title, setTitle] = useState('');
+  const [notes, setNotes] = useState('');
+  const selectedGrade = grades.find(g => g.id === gradeId);
+  const sections = selectedGrade?.sections || [];
+
+  async function load() {
+    const u = (await supabase.auth.getUser()).data.user;
+    if (!u) return;
+    const { data, error } = await supabase.from('teacher_files')
+      .select('id,title,file_name,file_type,file_path,category,notes,created_at,grades(name),sections(name),subjects(name)')
+      .eq('teacher_id', u.id)
+      .order('created_at', { ascending: false });
+    if (error) return setMsg(error.message);
+    setFiles(data || []);
+  }
+  useEffect(() => { load(); }, []);
+
+  async function upload(e) {
+    e.preventDefault();
+    const input = e.currentTarget.elements.file;
+    const file = input?.files?.[0];
+    if (!file) return setMsg('اختر ملفًا أولًا.');
+    if (!title.trim()) return setMsg('اكتب عنوانًا للملف.');
+    if (file.size > 50 * 1024 * 1024) return setMsg('الحد الأقصى لحجم الملف 50 ميجابايت.');
+    setLoading(true);
+    try {
+      const u = (await supabase.auth.getUser()).data.user;
+      const { yearId, semesterId } = await ensureYearSemester(u.id);
+      const safeName = file.name.replace(/[^\u0600-\u06FF\w. -]/g, '_').replace(/\s+/g, '_');
+      const path = u.id + '/' + yearId + '/' + crypto.randomUUID() + '-' + safeName;
+      const up = await supabase.storage.from('teacher-files').upload(path, file, { upsert: false });
+      if (up.error) throw up.error;
+
+      const { error } = await supabase.from('teacher_files').insert({
+        teacher_id: u.id, academic_year_id: yearId, semester_id: semesterId,
+        grade_id: gradeId || null, section_id: sectionId || null, subject_id: subjectId || null,
+        category: clean(category), title: clean(title), file_name: file.name,
+        file_path: path, file_type: file.type || null, notes: clean(notes) || null
+      });
+      if (error) {
+        await supabase.storage.from('teacher-files').remove([path]);
+        throw error;
+      }
+      setTitle(''); setNotes(''); input.value = '';
+      setMsg('تم رفع الملف وحفظه في المكتبة.');
+      await load();
+    } catch (e) {
+      setMsg(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openFile(row) {
+    const { data, error } = await supabase.storage.from('teacher-files').createSignedUrl(row.file_path, 300);
+    if (error) return setMsg(error.message);
+    window.open(data.signedUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  async function removeFile(row) {
+    if (!window.confirm('هل تريد حذف الملف من المكتبة؟')) return;
+    setLoading(true);
+    try {
+      const storage = await supabase.storage.from('teacher-files').remove([row.file_path]);
+      if (storage.error) throw storage.error;
+      const { error } = await supabase.from('teacher_files').delete().eq('id', row.id);
+      if (error) throw error;
+      setMsg('تم حذف الملف.');
+      await load();
+    } catch (e) {
+      setMsg(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return <>
+    <div className="head"><div><h1>المكتبة والملفات</h1><p>مكتبة خاصة بالمعلم للكتب وأوراق العمل والنماذج والمرفقات.</p></div></div>
+    <form className="card formCard" onSubmit={upload}>
+      <h2>رفع ملف جديد</h2>
+      <div className="formGrid">
+        <input required name="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.doc,.docx,.ppt,.pptx,.txt"/>
+        <input required placeholder="عنوان الملف" value={title} onChange={e => setTitle(e.target.value)}/>
+        <select value={category} onChange={e => setCategory(e.target.value)}>
+          <option>ورقة عمل</option><option>كتاب</option><option>خطة</option><option>نموذج</option><option>صور</option><option>أخرى</option>
+        </select>
+        <select value={gradeId} onChange={e => { setGradeId(e.target.value); setSectionId(''); }}>
+          <option value="">الصف — اختياري</option>{grades.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+        </select>
+        <select value={sectionId} onChange={e => setSectionId(e.target.value)} disabled={!gradeId}>
+          <option value="">الشعبة — اختياري</option>{sections.map(s => <option key={s.id} value={s.id}>الشعبة {s.name}</option>)}
+        </select>
+        <select value={subjectId} onChange={e => setSubjectId(e.target.value)}>
+          <option value="">المبحث — اختياري</option>{subjects.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <textarea placeholder="ملاحظات" value={notes} onChange={e => setNotes(e.target.value)}/>
+      </div>
+      <button className="primary" disabled={loading} type="submit">{loading ? 'جارٍ الرفع…' : '⬆️ رفع وحفظ'}</button>
+    </form>
+
+    <div className="card table">
+      <h2>المكتبة</h2>
+      <table><thead><tr><th>العنوان</th><th>النوع</th><th>السياق</th><th>التاريخ</th><th>إجراء</th></tr></thead>
+      <tbody>{files.map(x => <tr key={x.id}>
+        <td><strong>{x.title}</strong><br/><small>{x.file_name}</small></td>
+        <td>{x.category}</td>
+        <td>{x.grades?.name || '—'} / {x.sections?.name || '—'} / {x.subjects?.name || '—'}</td>
+        <td>{new Date(x.created_at).toLocaleDateString('ar-PS')}</td>
+        <td className="actions"><button onClick={() => openFile(x)}>فتح</button><button onClick={() => removeFile(x)}>حذف</button></td>
+      </tr>)}</tbody></table>
+      {!files.length && <div className="empty">المكتبة فارغة حاليًا. ارفع أول ملف.</div>}
+    </div>
+  </>;
+}
+
 function Placeholder({ page }) {
   const m = {
-    lab: ['المختبر والأنشطة', 'سجل الأدوات والأنشطة المخبرية والنتائج والمرفقات.'],
     exams: ['الامتحانات وبنك الأسئلة', 'بنك أسئلة، مولد امتحانات، وأنشطة إلكترونية.'],
-    files: ['المكتبة والملفات', 'كتب، أوراق عمل، نماذج ومرفقات قابلة للأرشفة والبحث.'],
     meetings: ['الاجتماعات والنادي العلمي', 'محاضر اجتماعات لجنة المبحث وأنشطة النادي العلمي.'],
     reports: ['التقارير', 'تقارير الطلاب والحضور والتحضير والأنشطة والامتحانات.']
   };
