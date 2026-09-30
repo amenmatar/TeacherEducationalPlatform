@@ -180,6 +180,7 @@ async function loadAll(user) {
           {page === 'lab' && <Lab grades={grades} subjects={subjects} setMsg={setMsg} />}
           {page === 'files' && <Files grades={grades} subjects={subjects} setMsg={setMsg} />}
           {page === 'reports' && <Reports grades={grades} subjects={subjects} setMsg={setMsg} />}
+          {page === 'meetings' && <Meetings grades={grades} setMsg={setMsg} />}
           {!['home', 'classes', 'students', 'plans', 'attendance', 'lab', 'files', 'reports'].includes(page) && <Placeholder page={page} />}
         </main>
       </div>
@@ -1076,6 +1077,163 @@ function Reports({ grades, subjects, setMsg }) {
       <div className="card table"><h2>الملفات المضافة خلال الفترة</h2><table><thead><tr><th>العنوان</th><th>التصنيف</th><th>تاريخ الإضافة</th></tr></thead>
         <tbody>{report.files.map(x => <tr key={x.id}><td>{x.title}</td><td>{x.category}</td><td>{new Date(x.created_at).toLocaleDateString('ar-PS')}</td></tr>)}</tbody>
       </table>{!report.files.length && <div className="empty">لا توجد ملفات مضافة في الفترة.</div>}</div>
+    </>}
+  </>;
+}
+
+
+function Meetings({ grades, setMsg }) {
+  const [tab, setTab] = useState('meetings');
+  const [meetings, setMeetings] = useState([]);
+  const [activities, setActivities] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [meeting, setMeeting] = useState({
+    meeting_date: today(), title: '', meeting_type: 'اجتماع لجنة المبحث',
+    participants: '', agenda: '', decisions: '', follow_up: '', notes: ''
+  });
+  const [activity, setActivity] = useState({
+    activity_date: today(), title: '', grade_id: '', section_id: '',
+    objective: '', participants: '', activity_details: '', outcome: '', notes: ''
+  });
+
+  const activityGrade = grades.find(g => g.id === activity.grade_id);
+  const activitySections = activityGrade?.sections || [];
+
+  async function load() {
+    const u = (await supabase.auth.getUser()).data.user;
+    if (!u) return;
+    const [{ data: ms, error: me }, { data: sa, error: se }] = await Promise.all([
+      supabase.from('meetings')
+        .select('id,meeting_date,title,meeting_type,participants,agenda,decisions,follow_up,notes')
+        .eq('teacher_id', u.id)
+        .order('meeting_date', { ascending: false })
+        .order('created_at', { ascending: false }),
+      supabase.from('science_club_activities')
+        .select('id,activity_date,title,objective,participants,activity_details,outcome,notes,grades(name),sections(name)')
+        .eq('teacher_id', u.id)
+        .order('activity_date', { ascending: false })
+        .order('created_at', { ascending: false })
+    ]);
+    if (me) return setMsg(me.message);
+    if (se) return setMsg(se.message);
+    setMeetings(ms || []);
+    setActivities(sa || []);
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function saveMeeting(e) {
+    e.preventDefault();
+    if (!clean(meeting.title)) return setMsg('اكتب عنوان الاجتماع أولًا.');
+    setLoading(true);
+    try {
+      const u = (await supabase.auth.getUser()).data.user;
+      const { yearId, semesterId } = await ensureYearSemester(u.id);
+      const { error } = await supabase.from('meetings').insert({
+        teacher_id: u.id, academic_year_id: yearId, semester_id: semesterId,
+        meeting_date: meeting.meeting_date || today(),
+        title: clean(meeting.title),
+        meeting_type: clean(meeting.meeting_type) || null,
+        participants: clean(meeting.participants) || null,
+        agenda: clean(meeting.agenda) || null,
+        decisions: clean(meeting.decisions) || null,
+        follow_up: clean(meeting.follow_up) || null,
+        notes: clean(meeting.notes) || null
+      });
+      if (error) throw error;
+      setMeeting({ ...meeting, title: '', participants: '', agenda: '', decisions: '', follow_up: '', notes: '' });
+      setMsg('تم حفظ محضر الاجتماع.');
+      await load();
+    } catch (e) { setMsg(e.message); }
+    finally { setLoading(false); }
+  }
+
+  async function saveActivity(e) {
+    e.preventDefault();
+    if (!clean(activity.title)) return setMsg('اكتب عنوان النشاط أولًا.');
+    setLoading(true);
+    try {
+      const u = (await supabase.auth.getUser()).data.user;
+      const { yearId, semesterId } = await ensureYearSemester(u.id);
+      const { error } = await supabase.from('science_club_activities').insert({
+        teacher_id: u.id, academic_year_id: yearId, semester_id: semesterId,
+        grade_id: activity.grade_id || null, section_id: activity.section_id || null,
+        activity_date: activity.activity_date || today(),
+        title: clean(activity.title),
+        objective: clean(activity.objective) || null,
+        participants: clean(activity.participants) || null,
+        activity_details: clean(activity.activity_details) || null,
+        outcome: clean(activity.outcome) || null,
+        notes: clean(activity.notes) || null
+      });
+      if (error) throw error;
+      setActivity({ ...activity, title: '', objective: '', participants: '', activity_details: '', outcome: '', notes: '' });
+      setMsg('تم حفظ نشاط النادي العلمي.');
+      await load();
+    } catch (e) { setMsg(e.message); }
+    finally { setLoading(false); }
+  }
+
+  return <>
+    <div className="head">
+      <div><h1>الاجتماعات والنادي العلمي</h1><p>محاضر الاجتماعات وأنشطة النادي العلمي محفوظة ضمن حساب المعلم والعام والفصل.</p></div>
+      <div className="actions">
+        <button className={tab === 'meetings' ? 'primary' : ''} onClick={() => setTab('meetings')}>🤝 الاجتماعات</button>
+        <button className={tab === 'club' ? 'primary' : ''} onClick={() => setTab('club')}>🔬 النادي العلمي</button>
+      </div>
+    </div>
+
+    {tab === 'meetings' ? <>
+      <form className="card formCard" onSubmit={saveMeeting}>
+        <h2>إضافة محضر اجتماع</h2>
+        <div className="formGrid">
+          <input type="date" value={meeting.meeting_date} onChange={e => setMeeting({ ...meeting, meeting_date: e.target.value })}/>
+          <select value={meeting.meeting_type} onChange={e => setMeeting({ ...meeting, meeting_type: e.target.value })}>
+            <option>اجتماع لجنة المبحث</option><option>اجتماع تربوي</option><option>اجتماع فريق</option><option>اجتماع آخر</option>
+          </select>
+          <input required placeholder="عنوان الاجتماع" value={meeting.title} onChange={e => setMeeting({ ...meeting, title: e.target.value })}/>
+          <input placeholder="المشاركون" value={meeting.participants} onChange={e => setMeeting({ ...meeting, participants: e.target.value })}/>
+          <textarea placeholder="جدول الأعمال" value={meeting.agenda} onChange={e => setMeeting({ ...meeting, agenda: e.target.value })}/>
+          <textarea placeholder="القرارات والتوصيات" value={meeting.decisions} onChange={e => setMeeting({ ...meeting, decisions: e.target.value })}/>
+          <textarea placeholder="المتابعة والمسؤوليات" value={meeting.follow_up} onChange={e => setMeeting({ ...meeting, follow_up: e.target.value })}/>
+          <textarea placeholder="ملاحظات" value={meeting.notes} onChange={e => setMeeting({ ...meeting, notes: e.target.value })}/>
+        </div>
+        <button className="primary" disabled={loading} type="submit">{loading ? 'جارٍ الحفظ…' : '💾 حفظ المحضر'}</button>
+      </form>
+
+      <div className="card table"><h2>محاضر الاجتماعات</h2>
+        <table><thead><tr><th>التاريخ</th><th>النوع</th><th>العنوان</th><th>المشاركون</th><th>القرارات</th></tr></thead>
+          <tbody>{meetings.map(x => <tr key={x.id}><td>{x.meeting_date}</td><td>{x.meeting_type || '—'}</td><td>{x.title}</td><td>{x.participants || '—'}</td><td>{x.decisions || '—'}</td></tr>)}</tbody>
+        </table>
+        {!meetings.length && <div className="empty">لا توجد محاضر اجتماعات محفوظة بعد.</div>}
+      </div>
+    </> : <>
+      <form className="card formCard" onSubmit={saveActivity}>
+        <h2>إضافة نشاط للنادي العلمي</h2>
+        <div className="formGrid">
+          <input type="date" value={activity.activity_date} onChange={e => setActivity({ ...activity, activity_date: e.target.value })}/>
+          <input required placeholder="عنوان النشاط" value={activity.title} onChange={e => setActivity({ ...activity, title: e.target.value })}/>
+          <select value={activity.grade_id} onChange={e => setActivity({ ...activity, grade_id: e.target.value, section_id: '' })}>
+            <option value="">الصف — اختياري</option>{grades.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+          <select value={activity.section_id} onChange={e => setActivity({ ...activity, section_id: e.target.value })} disabled={!activity.grade_id}>
+            <option value="">الشعبة — اختياري</option>{activitySections.map(s => <option key={s.id} value={s.id}>الشعبة {s.name}</option>)}
+          </select>
+          <input placeholder="الهدف" value={activity.objective} onChange={e => setActivity({ ...activity, objective: e.target.value })}/>
+          <input placeholder="المشاركون" value={activity.participants} onChange={e => setActivity({ ...activity, participants: e.target.value })}/>
+          <textarea placeholder="تفاصيل النشاط" value={activity.activity_details} onChange={e => setActivity({ ...activity, activity_details: e.target.value })}/>
+          <textarea placeholder="المخرجات / النتائج" value={activity.outcome} onChange={e => setActivity({ ...activity, outcome: e.target.value })}/>
+          <textarea placeholder="ملاحظات" value={activity.notes} onChange={e => setActivity({ ...activity, notes: e.target.value })}/>
+        </div>
+        <button className="primary" disabled={loading} type="submit">{loading ? 'جارٍ الحفظ…' : '💾 حفظ النشاط'}</button>
+      </form>
+
+      <div className="card table"><h2>أنشطة النادي العلمي</h2>
+        <table><thead><tr><th>التاريخ</th><th>النشاط</th><th>الصف/الشعبة</th><th>المشاركون</th><th>النتيجة</th></tr></thead>
+          <tbody>{activities.map(x => <tr key={x.id}><td>{x.activity_date}</td><td>{x.title}</td><td>{x.grades?.name || '—'} / {x.sections?.name || '—'}</td><td>{x.participants || '—'}</td><td>{x.outcome || '—'}</td></tr>)}</tbody>
+        </table>
+        {!activities.length && <div className="empty">لا توجد أنشطة للنادي العلمي محفوظة بعد.</div>}
+      </div>
     </>}
   </>;
 }
