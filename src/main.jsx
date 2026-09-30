@@ -110,8 +110,24 @@ function App() {
     if (session?.user) loadAll(session.user);
   }, [session]);
 
-  async function loadAll(user) {
+  async function ensureTeacherProfile(user) {
+  const { data: existing, error: readError } = await supabase
+    .from('teacher_profiles')
+    .select('id')
+    .eq('id', user.id)
+    .maybeSingle();
+  if (readError) throw readError;
+  if (existing) return;
+  const fullName = clean(user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split('@')[0] || 'المعلم');
+  const { error } = await supabase
+    .from('teacher_profiles')
+    .insert({ id: user.id, full_name: fullName, subject: 'العلوم والحياة' });
+  if (error && error.code !== '23505') throw error;
+}
+
+async function loadAll(user) {
     try {
+      await ensureTeacherProfile(user);
       const [{ data: p }, { data: gs }, { data: st }, { data: sub }] = await Promise.all([
         supabase.from('teacher_profiles').select('*').eq('id', user.id).maybeSingle(),
         supabase.from('grades').select('id,name,sort_order,sections(id,name,room)').eq('teacher_id', user.id).order('sort_order').order('name'),
@@ -475,9 +491,13 @@ function Attendance({ grades, subjects, setMsg }) {
     if (!selectedSection) { setStudents([]); return; }
     (async () => {
       const u = (await supabase.auth.getUser()).data.user;
+      const { yearId, semesterId } = await ensureYearSemester(u.id);
       const { data, error } = await supabase.from('enrollments')
         .select('student_id,students(id,full_name,student_number)')
-        .eq('teacher_id', u.id).eq('section_id', selectedSection);
+        .eq('teacher_id', u.id)
+        .eq('academic_year_id', yearId)
+        .eq('semester_id', semesterId)
+        .eq('section_id', selectedSection);
       if (error) setMsg(error.message);
       else {
         const list = data || [];
@@ -498,10 +518,41 @@ function Attendance({ grades, subjects, setMsg }) {
         section_id: selectedSection, subject_id: selectedSubject || null,
         attendance_date: date, status: 'completed'
       };
-      const { data: sessionRow, error } = await supabase.from('attendance_sessions')
-        .upsert(payload, { onConflict: 'teacher_id,section_id,attendance_date,subject_id' })
-        .select('id').single();
-      if (error) throw error;
+
+      let sessionRow = null;
+      if (selectedSubject) {
+        const result = await supabase.from('attendance_sessions')
+          .upsert(payload, { onConflict: 'teacher_id,section_id,attendance_date,subject_id' })
+          .select('id').single();
+        if (result.error) throw result.error;
+        sessionRow = result.data;
+      } else {
+        const existing = await supabase.from('attendance_sessions')
+          .select('id')
+          .eq('teacher_id', u.id)
+          .eq('academic_year_id', yearId)
+          .eq('semester_id', semesterId)
+          .eq('section_id', selectedSection)
+          .eq('attendance_date', date)
+          .is('subject_id', null)
+          .maybeSingle();
+        if (existing.error) throw existing.error;
+
+        if (existing.data) {
+          const updated = await supabase.from('attendance_sessions')
+            .update({ status: 'completed' })
+            .eq('id', existing.data.id)
+            .select('id').single();
+          if (updated.error) throw updated.error;
+          sessionRow = updated.data;
+        } else {
+          const inserted = await supabase.from('attendance_sessions')
+            .insert(payload)
+            .select('id').single();
+          if (inserted.error) throw inserted.error;
+          sessionRow = inserted.data;
+        }
+      }
 
       const records = students.map(x => ({
         teacher_id: u.id, attendance_session_id: sessionRow.id,
