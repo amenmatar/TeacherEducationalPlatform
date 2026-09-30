@@ -177,7 +177,8 @@ async function loadAll(user) {
           {page === 'students' && <Students students={students} reload={reload} setMsg={setMsg} />}
           {page === 'plans' && <Plans grades={grades} subjects={subjects} reload={reload} setMsg={setMsg} />}
           {page === 'attendance' && <Attendance grades={grades} subjects={subjects} setMsg={setMsg} />}
-          {!['home', 'classes', 'students', 'plans', 'attendance'].includes(page) && <Placeholder page={page} />}
+          {page === 'lab' && <Lab grades={grades} subjects={subjects} setMsg={setMsg} />}
+          {!['home', 'classes', 'students', 'plans', 'attendance', 'lab'].includes(page) && <Placeholder page={page} />}
         </main>
       </div>
     </div>
@@ -583,6 +584,172 @@ function Attendance({ grades, subjects, setMsg }) {
     <div className="card table"><table><thead><tr><th>الطالب</th><th>الرقم</th><th>الحالة</th></tr></thead>
       <tbody>{students.map(x => <tr key={x.student_id}><td>{x.students?.full_name}</td><td>{x.students?.student_number || '—'}</td><td><select value={status[x.student_id] || 'present'} onChange={e => setStatus({ ...status, [x.student_id]: e.target.value })}><option value="present">حاضر</option><option value="absent">غائب</option><option value="late">متأخر</option><option value="excused">معذور</option></select></td></tr>)}</tbody>
     </table>{!students.length && <div className="empty">اختر شعبة تحتوي على طلاب.</div>}</div>
+  </>;
+}
+
+function Lab({ grades, subjects, setMsg }) {
+  const [tab, setTab] = useState('activities');
+  const [activities, setActivities] = useState([]);
+  const [inventory, setInventory] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [activity, setActivity] = useState({
+    title: '', activity_date: today(), grade_id: '', section_id: '', subject_id: '',
+    objective: '', materials: '', procedure: '', result: '', safety_notes: '', notes: ''
+  });
+  const [item, setItem] = useState({
+    name: '', category: '', quantity: 1, condition: 'جيد', location: '', notes: ''
+  });
+
+  const selectedGrade = grades.find(g => g.id === activity.grade_id);
+  const sections = selectedGrade?.sections || [];
+
+  async function load() {
+    const u = (await supabase.auth.getUser()).data.user;
+    if (!u) return;
+    const [{ data: a, error: ae }, { data: i, error: ie }] = await Promise.all([
+      supabase.from('lab_activities')
+        .select('id,title,activity_date,objective,result,grades(name),sections(name),subjects(name)')
+        .eq('teacher_id', u.id)
+        .order('activity_date', { ascending: false })
+        .order('created_at', { ascending: false }),
+      supabase.from('lab_inventory')
+        .select('id,name,category,quantity,condition,location,notes')
+        .eq('teacher_id', u.id)
+        .order('name')
+    ]);
+    if (ae) return setMsg(ae.message);
+    if (ie) return setMsg(ie.message);
+    setActivities(a || []);
+    setInventory(i || []);
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function saveActivity(e) {
+    e.preventDefault();
+    if (!activity.title.trim()) return setMsg('اكتب عنوان النشاط أولًا.');
+    setLoading(true);
+    try {
+      const u = (await supabase.auth.getUser()).data.user;
+      const { yearId, semesterId } = await ensureYearSemester(u.id);
+      const { error } = await supabase.from('lab_activities').insert({
+        teacher_id: u.id,
+        academic_year_id: yearId,
+        semester_id: semesterId,
+        grade_id: activity.grade_id || null,
+        section_id: activity.section_id || null,
+        subject_id: activity.subject_id || null,
+        activity_date: activity.activity_date || today(),
+        title: clean(activity.title),
+        objective: clean(activity.objective) || null,
+        materials: clean(activity.materials) || null,
+        procedure: clean(activity.procedure) || null,
+        result: clean(activity.result) || null,
+        safety_notes: clean(activity.safety_notes) || null,
+        notes: clean(activity.notes) || null
+      });
+      if (error) throw error;
+      setMsg('تم حفظ النشاط المخبري.');
+      setActivity({ ...activity, title: '', objective: '', materials: '', procedure: '', result: '', safety_notes: '', notes: '' });
+      await load();
+    } catch (e) {
+      setMsg(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveItem(e) {
+    e.preventDefault();
+    if (!item.name.trim()) return setMsg('اكتب اسم الأداة أو المادة.');
+    setLoading(true);
+    try {
+      const u = (await supabase.auth.getUser()).data.user;
+      const { yearId, semesterId } = await ensureYearSemester(u.id);
+      const { error } = await supabase.from('lab_inventory').insert({
+        teacher_id: u.id,
+        academic_year_id: yearId,
+        semester_id: semesterId,
+        name: clean(item.name),
+        category: clean(item.category) || null,
+        quantity: Math.max(0, Number(item.quantity) || 0),
+        condition: clean(item.condition) || 'جيد',
+        location: clean(item.location) || null,
+        notes: clean(item.notes) || null
+      });
+      if (error) throw error;
+      setMsg('تمت إضافة الأداة إلى جرد المختبر.');
+      setItem({ name: '', category: '', quantity: 1, condition: 'جيد', location: '', notes: '' });
+      await load();
+    } catch (e) {
+      setMsg(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return <>
+    <div className="head">
+      <div><h1>المختبر والأنشطة</h1><p>توثيق الأنشطة العملية وجرد الأدوات ضمن العام والفصل الدراسي.</p></div>
+      <div className="actions">
+        <button className={tab === 'activities' ? 'primary' : ''} onClick={() => setTab('activities')}>🔬 الأنشطة</button>
+        <button className={tab === 'inventory' ? 'primary' : ''} onClick={() => setTab('inventory')}>🧰 الجرد</button>
+      </div>
+    </div>
+
+    {tab === 'activities' ? <>
+      <form className="card formCard" onSubmit={saveActivity}>
+        <h2>إضافة نشاط مخبري</h2>
+        <div className="formGrid">
+          <input required placeholder="عنوان النشاط" value={activity.title} onChange={e => setActivity({ ...activity, title: e.target.value })}/>
+          <input type="date" value={activity.activity_date} onChange={e => setActivity({ ...activity, activity_date: e.target.value })}/>
+          <select value={activity.grade_id} onChange={e => setActivity({ ...activity, grade_id: e.target.value, section_id: '' })}>
+            <option value="">الصف — اختياري</option>{grades.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+          <select value={activity.section_id} onChange={e => setActivity({ ...activity, section_id: e.target.value })} disabled={!activity.grade_id}>
+            <option value="">الشعبة — اختياري</option>{sections.map(s => <option key={s.id} value={s.id}>الشعبة {s.name}</option>)}
+          </select>
+          <select value={activity.subject_id} onChange={e => setActivity({ ...activity, subject_id: e.target.value })}>
+            <option value="">المبحث — اختياري</option>{subjects.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <input placeholder="الهدف" value={activity.objective} onChange={e => setActivity({ ...activity, objective: e.target.value })}/>
+          <textarea placeholder="الأدوات والمواد" value={activity.materials} onChange={e => setActivity({ ...activity, materials: e.target.value })}/>
+          <textarea placeholder="خطوات التنفيذ" value={activity.procedure} onChange={e => setActivity({ ...activity, procedure: e.target.value })}/>
+          <textarea placeholder="النتيجة والملاحظات العلمية" value={activity.result} onChange={e => setActivity({ ...activity, result: e.target.value })}/>
+          <textarea placeholder="تنبيهات السلامة" value={activity.safety_notes} onChange={e => setActivity({ ...activity, safety_notes: e.target.value })}/>
+          <textarea placeholder="ملاحظات إضافية" value={activity.notes} onChange={e => setActivity({ ...activity, notes: e.target.value })}/>
+        </div>
+        <button className="primary" disabled={loading} type="submit">{loading ? 'جارٍ الحفظ…' : '💾 حفظ النشاط'}</button>
+      </form>
+
+      <div className="card table">
+        <h2>آخر الأنشطة</h2>
+        <table><thead><tr><th>التاريخ</th><th>النشاط</th><th>الصف/الشعبة</th><th>المبحث</th><th>النتيجة</th></tr></thead>
+          <tbody>{activities.map(x => <tr key={x.id}><td>{x.activity_date}</td><td>{x.title}</td><td>{x.grades?.name || '—'} / {x.sections?.name || '—'}</td><td>{x.subjects?.name || '—'}</td><td>{x.result || '—'}</td></tr>)}</tbody>
+        </table>
+        {!activities.length && <div className="empty">لا توجد أنشطة مخبرية محفوظة بعد.</div>}
+      </div>
+    </> : <>
+      <form className="card formCard" onSubmit={saveItem}>
+        <h2>إضافة أداة أو مادة</h2>
+        <div className="formGrid">
+          <input required placeholder="اسم الأداة / المادة" value={item.name} onChange={e => setItem({ ...item, name: e.target.value })}/>
+          <input placeholder="التصنيف" value={item.category} onChange={e => setItem({ ...item, category: e.target.value })}/>
+          <input type="number" min="0" placeholder="الكمية" value={item.quantity} onChange={e => setItem({ ...item, quantity: e.target.value })}/>
+          <select value={item.condition} onChange={e => setItem({ ...item, condition: e.target.value })}><option>جيد</option><option>يحتاج صيانة</option><option>تالف</option></select>
+          <input placeholder="الموقع / الخزانة" value={item.location} onChange={e => setItem({ ...item, location: e.target.value })}/>
+          <textarea placeholder="ملاحظات" value={item.notes} onChange={e => setItem({ ...item, notes: e.target.value })}/>
+        </div>
+        <button className="primary" disabled={loading} type="submit">{loading ? 'جارٍ الحفظ…' : '💾 حفظ في الجرد'}</button>
+      </form>
+      <div className="card table">
+        <h2>جرد المختبر</h2>
+        <table><thead><tr><th>الأداة / المادة</th><th>التصنيف</th><th>الكمية</th><th>الحالة</th><th>الموقع</th></tr></thead>
+          <tbody>{inventory.map(x => <tr key={x.id}><td>{x.name}</td><td>{x.category || '—'}</td><td>{x.quantity}</td><td>{x.condition}</td><td>{x.location || '—'}</td></tr>)}</tbody>
+        </table>
+        {!inventory.length && <div className="empty">لا توجد أدوات مسجلة في الجرد بعد.</div>}
+      </div>
+    </>}
   </>;
 }
 
