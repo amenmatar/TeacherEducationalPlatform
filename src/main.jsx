@@ -3,10 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { createClient } from '@supabase/supabase-js';
 import './styles.css';
 
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL,
-  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY
-);
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://qnywocqnpaxjuidlpsdm.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_qTF4ChwTjAwFtT8RiUONog_jlc6ZJnv';
+const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
 const YEAR_NAME = '2026 / 2027';
 const SEMESTER_NAMES = ['الفصل الأول', 'الفصل الثاني'];
