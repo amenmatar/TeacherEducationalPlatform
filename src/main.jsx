@@ -178,6 +178,7 @@ async function loadAll(user) {
           {page === 'plans' && <Plans grades={grades} subjects={subjects} reload={reload} setMsg={setMsg} />}
           {page === 'attendance' && <Attendance grades={grades} subjects={subjects} setMsg={setMsg} />}
           {page === 'lab' && <Lab grades={grades} subjects={subjects} setMsg={setMsg} />}
+          {page === 'exams' && <Exams grades={grades} subjects={subjects} setMsg={setMsg} />}
           {page === 'files' && <Files grades={grades} subjects={subjects} setMsg={setMsg} />}
           {page === 'reports' && <Reports grades={grades} subjects={subjects} setMsg={setMsg} />}
           {page === 'meetings' && <Meetings grades={grades} setMsg={setMsg} />}
@@ -1238,9 +1239,225 @@ function Meetings({ grades, setMsg }) {
   </>;
 }
 
+function Exams({ grades, subjects, setMsg }) {
+  const [tab, setTab] = useState('questions');
+  const [questions, setQuestions] = useState([]);
+  const [exams, setExams] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [filterGrade, setFilterGrade] = useState('');
+  const [filterSubject, setFilterSubject] = useState('');
+  const [question, setQuestion] = useState({
+    grade_id: '', subject_id: '', unit_name: '', lesson_topic: '',
+    question_type: 'short_answer', difficulty: 'medium', question_text: '',
+    options: '', correct_answer: '', answer_explanation: '', marks: 1
+  });
+  const [exam, setExam] = useState({
+    title: '', exam_date: today(), duration_minutes: 45,
+    grade_id: '', section_id: '', subject_id: '', instructions: ''
+  });
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState([]);
+
+  const examGrade = grades.find(g => g.id === exam.grade_id);
+  const examSections = examGrade?.sections || [];
+
+  async function load() {
+    const u = (await supabase.auth.getUser()).data.user;
+    if (!u) return;
+    const [{ data: qs, error: qe }, { data: es, error: ee }] = await Promise.all([
+      supabase.from('question_bank')
+        .select('id,grade_id,subject_id,unit_name,lesson_topic,question_type,difficulty,question_text,options,correct_answer,answer_explanation,marks,grades(name),subjects(name)')
+        .eq('teacher_id', u.id)
+        .order('created_at', { ascending: false }),
+      supabase.from('exams')
+        .select('id,title,exam_date,duration_minutes,total_marks,instructions,status,grades(name),sections(name),subjects(name)')
+        .eq('teacher_id', u.id)
+        .order('exam_date', { ascending: false })
+        .order('created_at', { ascending: false })
+    ]);
+    if (qe) return setMsg(qe.message);
+    if (ee) return setMsg(ee.message);
+    setQuestions(qs || []);
+    setExams(es || []);
+  }
+
+  useEffect(() => { load(); }, []);
+
+  const visibleQuestions = questions.filter(q =>
+    (!filterGrade || q.grade_id === filterGrade) &&
+    (!filterSubject || q.subject_id === filterSubject)
+  );
+
+  async function saveQuestion(e) {
+    e.preventDefault();
+    if (!clean(question.question_text)) return setMsg('اكتب نص السؤال أولًا.');
+    setLoading(true);
+    try {
+      const u = (await supabase.auth.getUser()).data.user;
+      const rawOptions = clean(question.options);
+      const options = rawOptions ? rawOptions.split(/\\n|\\|/).map(clean).filter(Boolean) : [];
+      const { error } = await supabase.from('question_bank').insert({
+        teacher_id: u.id,
+        grade_id: question.grade_id || null,
+        subject_id: question.subject_id || null,
+        unit_name: clean(question.unit_name) || null,
+        lesson_topic: clean(question.lesson_topic) || null,
+        question_type: question.question_type,
+        difficulty: question.difficulty,
+        question_text: clean(question.question_text),
+        options,
+        correct_answer: clean(question.correct_answer) || null,
+        answer_explanation: clean(question.answer_explanation) || null,
+        marks: Math.max(0, Number(question.marks) || 1)
+      });
+      if (error) throw error;
+      setQuestion({ ...question, question_text: '', options: '', correct_answer: '', answer_explanation: '' });
+      setMsg('تمت إضافة السؤال إلى بنك الأسئلة.');
+      await load();
+    } catch (e) { setMsg(e.message); }
+    finally { setLoading(false); }
+  }
+
+  function toggleQuestion(id) {
+    setSelectedQuestionIds(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]);
+  }
+
+  async function saveExam(e) {
+    e.preventDefault();
+    if (!clean(exam.title)) return setMsg('اكتب عنوان الامتحان أولًا.');
+    if (!exam.grade_id) return setMsg('اختر الصف قبل إنشاء الامتحان.');
+    if (!selectedQuestionIds.length) return setMsg('اختر سؤالًا واحدًا على الأقل لإضافته للامتحان.');
+    setLoading(true);
+    try {
+      const u = (await supabase.auth.getUser()).data.user;
+      const { yearId, semesterId } = await ensureYearSemester(u.id);
+      const chosen = questions.filter(q => selectedQuestionIds.includes(q.id));
+      const total = chosen.reduce((sum, q) => sum + Number(q.marks || 0), 0);
+      const { data: created, error } = await supabase.from('exams').insert({
+        teacher_id: u.id,
+        academic_year_id: yearId,
+        semester_id: semesterId,
+        grade_id: exam.grade_id,
+        section_id: exam.section_id || null,
+        subject_id: exam.subject_id || null,
+        title: clean(exam.title),
+        exam_date: exam.exam_date || null,
+        duration_minutes: Math.max(1, Number(exam.duration_minutes) || 45),
+        total_marks: total,
+        instructions: clean(exam.instructions) || null,
+        status: 'draft'
+      }).select('id').single();
+      if (error) throw error;
+      const links = chosen.map((q, index) => ({
+        teacher_id: u.id,
+        exam_id: created.id,
+        question_id: q.id,
+        question_order: index + 1,
+        marks: Number(q.marks || 1)
+      }));
+      const { error: linkError } = await supabase.from('exam_questions').insert(links);
+      if (linkError) throw linkError;
+      setExam({ ...exam, title: '', instructions: '' });
+      setSelectedQuestionIds([]);
+      setMsg('تم إنشاء الامتحان وربط أسئلته بنجاح.');
+      await load();
+      setTab('exams');
+    } catch (e) { setMsg(e.message); }
+    finally { setLoading(false); }
+  }
+
+  return <>
+    <div className="head">
+      <div><h1>الامتحانات وبنك الأسئلة</h1><p>أنشئ بنكًا قابلًا لإعادة الاستخدام، ثم اختر الأسئلة لبناء امتحان مرتبط بالصف والشعبة والمبحث.</p></div>
+      <div className="actions">
+        <button className={tab === 'questions' ? 'primary' : ''} onClick={() => setTab('questions')}>🧠 بنك الأسئلة</button>
+        <button className={tab === 'newExam' ? 'primary' : ''} onClick={() => setTab('newExam')}>📝 إنشاء امتحان</button>
+        <button className={tab === 'exams' ? 'primary' : ''} onClick={() => setTab('exams')}>📋 الامتحانات</button>
+      </div>
+    </div>
+
+    {tab === 'questions' && <>
+      <form className="card formCard" onSubmit={saveQuestion}>
+        <h2>إضافة سؤال جديد</h2>
+        <div className="formGrid">
+          <select value={question.grade_id} onChange={e => setQuestion({ ...question, grade_id: e.target.value })}>
+            <option value="">الصف — اختياري</option>{grades.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+          <select value={question.subject_id} onChange={e => setQuestion({ ...question, subject_id: e.target.value })}>
+            <option value="">المبحث — اختياري</option>{subjects.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <input placeholder="الوحدة" value={question.unit_name} onChange={e => setQuestion({ ...question, unit_name: e.target.value })}/>
+          <input placeholder="موضوع الدرس" value={question.lesson_topic} onChange={e => setQuestion({ ...question, lesson_topic: e.target.value })}/>
+          <select value={question.question_type} onChange={e => setQuestion({ ...question, question_type: e.target.value })}>
+            <option value="short_answer">إجابة قصيرة</option><option value="multiple_choice">اختيار من متعدد</option><option value="true_false">صح / خطأ</option><option value="essay">مقالي</option>
+          </select>
+          <select value={question.difficulty} onChange={e => setQuestion({ ...question, difficulty: e.target.value })}>
+            <option value="easy">سهل</option><option value="medium">متوسط</option><option value="hard">متقدم</option>
+          </select>
+          <input type="number" min="0.5" step="0.5" value={question.marks} onChange={e => setQuestion({ ...question, marks: e.target.value })} placeholder="العلامة"/>
+          <textarea required placeholder="نص السؤال" value={question.question_text} onChange={e => setQuestion({ ...question, question_text: e.target.value })}/>
+          <textarea placeholder="الخيارات — افصل بينها بعلامة | أو كل خيار في سطر" value={question.options} onChange={e => setQuestion({ ...question, options: e.target.value })}/>
+          <input placeholder="الإجابة الصحيحة" value={question.correct_answer} onChange={e => setQuestion({ ...question, correct_answer: e.target.value })}/>
+          <textarea placeholder="شرح الإجابة / ملاحظة للمعلم" value={question.answer_explanation} onChange={e => setQuestion({ ...question, answer_explanation: e.target.value })}/>
+        </div>
+        <button className="primary" disabled={loading} type="submit">{loading ? 'جارٍ الحفظ…' : '💾 حفظ السؤال'}</button>
+      </form>
+
+      <div className="card table">
+        <div className="row"><div><h2>بنك الأسئلة</h2><small>{visibleQuestions.length} سؤال ظاهر</small></div><div className="actions">
+          <select value={filterGrade} onChange={e => setFilterGrade(e.target.value)}><option value="">كل الصفوف</option>{grades.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select>
+          <select value={filterSubject} onChange={e => setFilterSubject(e.target.value)}><option value="">كل المباحث</option>{subjects.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
+        </div></div>
+        <table><thead><tr><th>السؤال</th><th>الصف</th><th>المبحث</th><th>النوع</th><th>المستوى</th><th>العلامة</th></tr></thead>
+          <tbody>{visibleQuestions.map(q => <tr key={q.id}><td>{q.question_text}</td><td>{q.grades?.name || '—'}</td><td>{q.subjects?.name || '—'}</td><td>{q.question_type}</td><td>{q.difficulty}</td><td>{q.marks}</td></tr>)}</tbody>
+        </table>
+        {!visibleQuestions.length && <div className="empty">لا توجد أسئلة بعد. أضف أول سؤال من النموذج أعلاه.</div>}
+      </div>
+    </>}
+
+    {tab === 'newExam' && <>
+      <form className="card formCard" onSubmit={saveExam}>
+        <h2>إنشاء امتحان</h2>
+        <div className="formGrid">
+          <input required placeholder="عنوان الامتحان" value={exam.title} onChange={e => setExam({ ...exam, title: e.target.value })}/>
+          <input type="date" value={exam.exam_date} onChange={e => setExam({ ...exam, exam_date: e.target.value })}/>
+          <select value={exam.grade_id} onChange={e => setExam({ ...exam, grade_id: e.target.value, section_id: '' })}>
+            <option value="">اختر الصف</option>{grades.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+          <select value={exam.section_id} onChange={e => setExam({ ...exam, section_id: e.target.value })} disabled={!exam.grade_id}>
+            <option value="">كل الشعب</option>{examSections.map(s => <option key={s.id} value={s.id}>الشعبة {s.name}</option>)}
+          </select>
+          <select value={exam.subject_id} onChange={e => setExam({ ...exam, subject_id: e.target.value })}>
+            <option value="">كل المباحث</option>{subjects.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <input type="number" min="1" value={exam.duration_minutes} onChange={e => setExam({ ...exam, duration_minutes: e.target.value })} placeholder="المدة بالدقائق"/>
+          <textarea placeholder="تعليمات الامتحان" value={exam.instructions} onChange={e => setExam({ ...exam, instructions: e.target.value })}/>
+        </div>
+        <h3>اختر الأسئلة</h3>
+        <div className="table">
+          <table><thead><tr><th>اختيار</th><th>السؤال</th><th>الصف</th><th>المبحث</th><th>العلامة</th></tr></thead>
+          <tbody>{questions.filter(q => (!exam.grade_id || q.grade_id === exam.grade_id) && (!exam.subject_id || q.subject_id === exam.subject_id)).map(q =>
+            <tr key={q.id}><td><input type="checkbox" checked={selectedQuestionIds.includes(q.id)} onChange={() => toggleQuestion(q.id)}/></td><td>{q.question_text}</td><td>{q.grades?.name || '—'}</td><td>{q.subjects?.name || '—'}</td><td>{q.marks}</td></tr>
+          )}</tbody></table>
+        </div>
+        <div className="hint">الأسئلة المحددة: {selectedQuestionIds.length} • العلامة الإجمالية: {questions.filter(q => selectedQuestionIds.includes(q.id)).reduce((n, q) => n + Number(q.marks || 0), 0)}</div>
+        <button className="primary" disabled={loading} type="submit">{loading ? 'جارٍ إنشاء الامتحان…' : '💾 إنشاء وحفظ الامتحان'}</button>
+      </form>
+    </>}
+
+    {tab === 'exams' && <>
+      <div className="card table">
+        <div className="row"><div><h2>الامتحانات المحفوظة</h2><small>{exams.length} امتحان</small></div><button onClick={load}>🔄 تحديث</button></div>
+        <table><thead><tr><th>التاريخ</th><th>العنوان</th><th>الصف/الشعبة</th><th>المبحث</th><th>المدة</th><th>العلامة</th><th>الحالة</th></tr></thead>
+          <tbody>{exams.map(x => <tr key={x.id}><td>{x.exam_date || '—'}</td><td><strong>{x.title}</strong></td><td>{x.grades?.name || '—'} / {x.sections?.name || 'كل الشعب'}</td><td>{x.subjects?.name || '—'}</td><td>{x.duration_minutes || '—'} د</td><td>{x.total_marks}</td><td>{x.status}</td></tr>)}</tbody>
+        </table>
+        {!exams.length && <div className="empty">لا توجد امتحانات محفوظة بعد.</div>}
+      </div>
+    </>}
+  </>;
+}
+
 function Placeholder({ page }) {
   const m = {
-    exams: ['الامتحانات وبنك الأسئلة', 'بنك أسئلة، مولد امتحانات، وأنشطة إلكترونية.'],
     meetings: ['الاجتماعات والنادي العلمي', 'محاضر اجتماعات لجنة المبحث وأنشطة النادي العلمي.'],
     reports: ['التقارير', 'تقارير الطلاب والحضور والتحضير والأنشطة والامتحانات.']
   };
